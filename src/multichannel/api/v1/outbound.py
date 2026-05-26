@@ -1,4 +1,7 @@
-"""Outbound message enqueue endpoint."""
+"""Outbound message enqueue endpoint.
+
+Callers may send ``Idempotency-Key: <uuid>`` to safely retry POST /outbound.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +9,22 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+import structlog
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from multichannel.lib.conversation_id import derive_conversation_id
-from multichannel.models import EventOutbox, Message, MessageDirection, MessageProvider, MessageStatus
+from multichannel.lib.idempotency import claim_key, compute_fingerprint
+from multichannel.models import (
+    EventOutbox,
+    IdempotencyKey,
+    Message,
+    MessageDirection,
+    MessageProvider,
+    MessageStatus,
+)
 from multichannel.models.outbox_item import OutboxItem
 from multichannel.runtime import Actor, actor_dep, medici_dep, notaio_dep, session_dep
 from multichannel.schemas.cloudevent import CloudEvent, MessageData
@@ -18,6 +32,7 @@ from multichannel.services.medici_client import MediciClient, provider_to_channe
 from multichannel.services.notaio_client import AuditEvent, NotaioClient
 
 router = APIRouter(prefix="/outbound", tags=["outbound"])
+logger = structlog.get_logger("multichannel.outbound")
 
 SEND_TYPE = "cobd.multichannel.message.send"
 
@@ -37,8 +52,16 @@ def _recipient_person_id(data: MessageData) -> UUID:
     )
 
 
+async def reap_expired(session: AsyncSession) -> None:
+    """Delete expired idempotency rows."""
+
+    # TODO: Wire this into a periodic maintenance worker.
+    await session.execute(delete(IdempotencyKey).where(IdempotencyKey.expires_at <= datetime.now(tz=UTC)))
+
+
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def enqueue_outbound(
+    request: Request,
     event: CloudEvent,
     session: Annotated[AsyncSession, Depends(session_dep)],
     actor: Annotated[Actor, Depends(actor_dep)],
@@ -46,6 +69,7 @@ async def enqueue_outbound(
     medici: Annotated[MediciClient, Depends(medici_dep)],
     x_purpose: Annotated[str | None, Header(alias="X-Purpose")] = None,
     x_skip_consent: Annotated[str | None, Header(alias="X-Skip-Consent")] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, str]:
     if event.type != SEND_TYPE:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": {"code": "bad_type"}})
@@ -60,6 +84,45 @@ async def enqueue_outbound(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": {"code": "purpose_required"}},
         )
+
+    key_claim: IdempotencyKey | None = None
+    if idempotency_key:
+        fingerprint = compute_fingerprint(await request.body())
+        existing, was_new = await claim_key(session, idempotency_key, actor.actor_id, fingerprint)
+        now = datetime.now(tz=UTC)
+        if existing is not None and not was_new:
+            if existing.expires_at <= now:
+                await session.delete(existing)
+                await session.flush()
+                existing, was_new = await claim_key(session, idempotency_key, actor.actor_id, fingerprint)
+            elif existing.request_fingerprint != fingerprint:
+                logger.warning(
+                    "outbound.idempotency_conflict",
+                    actor_id=actor.actor_id,
+                    idempotency_key=idempotency_key,
+                )
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "error": "idempotency_conflict",
+                        "message": "Idempotency-Key reused with different body",
+                    },
+                )
+            else:
+                logger.info(
+                    "outbound.idempotency_replay",
+                    actor_id=actor.actor_id,
+                    idempotency_key=idempotency_key,
+                    message_id=str(existing.message_id),
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content={"message_id": str(existing.message_id), "status": "idempotent-replay"},
+                )
+        if existing is not None and was_new:
+            key_claim = existing
+    else:
+        logger.warning("outbound.no_idempotency_key", actor_id=actor.actor_id)
 
     skip_consent = (
         (x_skip_consent or "").lower() == "true"
@@ -113,6 +176,9 @@ async def enqueue_outbound(
     )
     session.add(message)
     await session.flush()
+    if key_claim is not None:
+        key_claim.message_id = message.id
+        await session.flush()
     session.add(
         OutboxItem(
             message_id=message.id,

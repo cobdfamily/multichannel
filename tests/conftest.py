@@ -20,7 +20,7 @@ from sqlalchemy.sql.elements import BinaryExpression
 
 from multichannel.api import router
 from multichannel.config import Settings
-from multichannel.models import EventOutbox, Message, OutboxItem
+from multichannel.models import EventOutbox, IdempotencyKey, Message, OutboxItem
 from multichannel.runtime import AppState, session_dep
 from multichannel.services.redis_publisher import RedisStreamPublisher
 
@@ -38,6 +38,7 @@ class MemoryStore:
     messages: list[Message] = field(default_factory=list)
     outbox_items: list[OutboxItem] = field(default_factory=list)
     events: list[EventOutbox] = field(default_factory=list)
+    idempotency_keys: list[IdempotencyKey] = field(default_factory=list)
 
 
 class FakeScalarResult:
@@ -63,6 +64,8 @@ class FakeSession:
             self.store.outbox_items.append(row)
         elif isinstance(row, EventOutbox):
             self.store.events.append(row)
+        elif isinstance(row, IdempotencyKey):
+            self.store.idempotency_keys.append(row)
 
     async def flush(self) -> None:
         return None
@@ -80,10 +83,14 @@ class FakeSession:
                 return len(self.store.events)
             if "outbox_items" in statement_text:
                 return len(self.store.outbox_items)
+            if "idempotency_keys" in statement_text:
+                return len(self.store.idempotency_keys)
             return len(self.store.messages)
 
         provider = None
         provider_message_id = None
+        actor_id = None
+        key = None
         for criterion in getattr(statement, "_where_criteria", ()):
             if isinstance(criterion, BinaryExpression):
                 name = getattr(criterion.left, "name", None)
@@ -92,6 +99,15 @@ class FakeSession:
                     provider = getattr(value, "value", value)
                 if name == "provider_message_id":
                     provider_message_id = value
+                if name == "actor_id":
+                    actor_id = value
+                if name == "key":
+                    key = value
+        if actor_id is not None and key is not None:
+            for row in self.store.idempotency_keys:
+                if row.actor_id == actor_id and row.key == key:
+                    return row
+            return None
         for row in self.store.messages:
             row_provider = getattr(row.provider, "value", row.provider)
             if row_provider == provider and row.provider_message_id == provider_message_id:
@@ -109,6 +125,8 @@ class FakeSession:
             rows = list(self.store.events)
         elif entity is OutboxItem:
             rows = list(self.store.outbox_items)
+        elif entity is IdempotencyKey:
+            rows = list(self.store.idempotency_keys)
         if provider is not None:
             rows = [
                 row
@@ -117,6 +135,12 @@ class FakeSession:
                 == provider
             ]
         return rows[0] if rows else None
+
+    async def delete(self, row) -> None:  # noqa: ANN001
+        if isinstance(row, IdempotencyKey):
+            self.store.idempotency_keys = [
+                existing for existing in self.store.idempotency_keys if existing.id != row.id
+            ]
 
     async def get(self, model, row_id):  # noqa: ANN001, ANN201
         if model is Message:

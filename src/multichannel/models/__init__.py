@@ -2,6 +2,7 @@
 
 from multichannel.models.base import Base, TimestampMixin
 from multichannel.models.event_outbox import EventOutbox, EventOutboxState
+from multichannel.models.idempotency_key import IdempotencyKey
 from multichannel.models.message import (
     Message,
     MessageDirection,
@@ -14,6 +15,7 @@ __all__ = [
     "Base",
     "EventOutbox",
     "EventOutboxState",
+    "IdempotencyKey",
     "Message",
     "MessageDirection",
     "MessageProvider",

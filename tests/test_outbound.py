@@ -50,6 +50,100 @@ async def test_outbound_happy_path(client, db_session):
 
 
 @pytest.mark.asyncio
+async def test_outbound_idempotency_replay(client, db_session):
+    person_id = str(uuid4())
+    body = outbound_event(person_id)
+    headers = {
+        "X-Actor-Id": "actor-1",
+        "X-Actor-Type": "user",
+        "X-Purpose": "care",
+        "Idempotency-Key": str(uuid4()),
+    }
+
+    first = await client.post("/api/v1/outbound", json=body, headers=headers)
+    second = await client.post("/api/v1/outbound", json=body, headers=headers)
+
+    assert first.status_code == 202
+    assert second.status_code == 200
+    assert second.json() == {
+        "message_id": first.json()["message_id"],
+        "status": "idempotent-replay",
+    }
+    assert len(db_session.store.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_outbound_idempotency_conflict(client, db_session):
+    body = outbound_event(str(uuid4()))
+    changed_body = outbound_event(str(uuid4()))
+    changed_body["data"]["text"] = "Different body"
+    headers = {
+        "X-Actor-Id": "actor-1",
+        "X-Actor-Type": "user",
+        "X-Purpose": "care",
+        "Idempotency-Key": str(uuid4()),
+    }
+
+    first = await client.post("/api/v1/outbound", json=body, headers=headers)
+    second = await client.post("/api/v1/outbound", json=changed_body, headers=headers)
+
+    assert first.status_code == 202
+    assert second.status_code == 422
+    assert second.json() == {
+        "error": "idempotency_conflict",
+        "message": "Idempotency-Key reused with different body",
+    }
+    assert len(db_session.store.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_outbound_different_actors_same_key_no_collision(client, db_session):
+    key = str(uuid4())
+    first_body = outbound_event(str(uuid4()))
+    second_body = outbound_event(str(uuid4()))
+    second_body["id"] = "evt-out-2"
+    second_body["data"]["provider_message_id"] = "local-out-2"
+
+    first = await client.post(
+        "/api/v1/outbound",
+        json=first_body,
+        headers={
+            "X-Actor-Id": "actor-1",
+            "X-Actor-Type": "user",
+            "X-Purpose": "care",
+            "Idempotency-Key": key,
+        },
+    )
+    second = await client.post(
+        "/api/v1/outbound",
+        json=second_body,
+        headers={
+            "X-Actor-Id": "actor-2",
+            "X-Actor-Type": "user",
+            "X-Purpose": "care",
+            "Idempotency-Key": key,
+        },
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert len(db_session.store.messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_outbound_without_key_still_works(client, db_session):
+    resp = await client.post(
+        "/api/v1/outbound",
+        json=outbound_event(str(uuid4())),
+        headers={"X-Actor-Id": "actor-1", "X-Actor-Type": "user", "X-Purpose": "care"},
+    )
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "queued"
+    assert len(db_session.store.messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_outbound_consent_denied(client, db_session, medici):
     medici.allowed = False
     resp = await client.post(
