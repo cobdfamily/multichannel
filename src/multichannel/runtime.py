@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,8 @@ class AppState:
     notaio: NotaioClient
     medici: MediciClient
     redis: RedisStreamPublisher
+    outbox_task: asyncio.Task | None = field(default=None)
+    event_outbox_task: asyncio.Task | None = field(default=None)
 
 
 def state(request: Request) -> AppState:

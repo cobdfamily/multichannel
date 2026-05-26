@@ -51,6 +51,12 @@ services:
       MC_REDIS_URL: redis://redis:6379/0
       MC_BIND: 0.0.0.0:8004
       MC_LOG_LEVEL: ${MC_LOG_LEVEL:-INFO}
+      # Drain workers ON for the runtime image. They no-op on
+      # empty tables, so it's safe to flip on. Set to false if
+      # you're running multichannel as a read replica that
+      # shouldn't dispatch.
+      MC_OUTBOX_DRAIN_ENABLED: "true"
+      MC_EVENT_OUTBOX_DRAIN_ENABLED: "true"
       # Downstream: medici + notaio aren't part of this compose;
       # point at the host (or wire them in if you bring those up
       # too).

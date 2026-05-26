@@ -57,6 +57,8 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
         log.info("event_outbox.drain.started")
     else:
         log.info("event_outbox.drain.disabled")
+    app.state.multichannel.outbox_task = outbox_task
+    app.state.multichannel.event_outbox_task = event_outbox_task
 
     try:
         yield
@@ -84,7 +86,7 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/health", include_in_schema=False)
-    async def health(response: Response) -> dict[str, str]:
+    async def health(response: Response) -> dict[str, object]:
         state = app.state.multichannel
         try:
             async with state.database.engine.connect() as conn:
@@ -96,7 +98,20 @@ def create_app() -> FastAPI:
         except Exception:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return {"status": "unhealthy"}
-        return {"status": "ok"}
+
+        def task_state(task: asyncio.Task | None) -> str:
+            if task is None:
+                return "disabled"
+            if task.done():
+                return "dead" if task.exception() else "finished"
+            return "running"
+
+        return {
+            "status": "ok",
+            "outbox_drain": task_state(getattr(state, "outbox_task", None)),
+            "event_outbox_drain":
+                task_state(getattr(state, "event_outbox_task", None)),
+        }
 
     app.include_router(api_router)
     return app
