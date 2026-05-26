@@ -1,0 +1,100 @@
+# Local-dev compose for the multichannel service.
+#
+#   cp .env.example .env
+#   # fill in provider creds (or leave placeholders; the
+#   # webhook routes still respond to signature verification
+#   # locally even without real creds)
+#   docker compose up -d
+#   docker compose logs -f multichannel
+#
+# Postgres + Redis come up first; the app waits for them via
+# depends_on healthchecks. The signalwire-relay sidecar comes
+# up independently and POSTs into the main service.
+
+name: multichannel
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: multichannel
+      POSTGRES_PASSWORD: multichannel
+      POSTGRES_DB: multichannel
+    ports:
+      - "5434:5432"   # host:container; avoid clash with medici on 5432/5433
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U multichannel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  multichannel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      MC_DATABASE_URL: postgresql+asyncpg://multichannel:multichannel@postgres:5432/multichannel
+      MC_REDIS_URL: redis://redis:6379/0
+      MC_BIND: 0.0.0.0:8004
+      MC_LOG_LEVEL: ${MC_LOG_LEVEL:-INFO}
+      # Downstream: medici + notaio aren't part of this compose;
+      # point at the host (or wire them in if you bring those up
+      # too).
+      MC_NOTAIO_URL: ${MC_NOTAIO_URL:-http://host.docker.internal:8003}
+      MC_NOTAIO_CLIENT_SECRET: ${MC_NOTAIO_CLIENT_SECRET:-dev-secret}
+      MC_MEDICI_URL: ${MC_MEDICI_URL:-http://host.docker.internal:8002}
+      MC_MEDICI_CLIENT_SECRET: ${MC_MEDICI_CLIENT_SECRET:-dev-secret}
+      # Provider creds
+      MC_POSTMARK_SERVER_TOKEN: ${MC_POSTMARK_SERVER_TOKEN:-}
+      MC_POSTMARK_WEBHOOK_SECRET: ${MC_POSTMARK_WEBHOOK_SECRET:-}
+      MC_SIGNALWIRE_PROJECT_ID: ${MC_SIGNALWIRE_PROJECT_ID:-}
+      MC_SIGNALWIRE_API_TOKEN: ${MC_SIGNALWIRE_API_TOKEN:-}
+      MC_SIGNALWIRE_SPACE_URL: ${MC_SIGNALWIRE_SPACE_URL:-}
+      MC_SIGNALWIRE_SIDECAR_HMAC: ${MC_SIGNALWIRE_SIDECAR_HMAC:-dev-sidecar-secret}
+      MC_META_APP_SECRET: ${MC_META_APP_SECRET:-}
+      MC_META_VERIFY_TOKEN: ${MC_META_VERIFY_TOKEN:-}
+      MC_META_PAGE_TOKEN: ${MC_META_PAGE_TOKEN:-}
+      MC_META_IG_USER_ID: ${MC_META_IG_USER_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "uv run alembic upgrade head &&
+             uv run uvicorn multichannel.main:app
+             --host 0.0.0.0 --port 8004"
+
+  signalwire-relay:
+    build:
+      context: ./sidecar/signalwire-relay
+      dockerfile: Dockerfile
+    ports:
+      - "8005:8005"
+    environment:
+      SWR_MULTICHANNEL_URL: http://multichannel:8004
+      SWR_SIDECAR_HMAC: ${MC_SIGNALWIRE_SIDECAR_HMAC:-dev-sidecar-secret}
+      SWR_SIGNALWIRE_PROJECT_ID: ${MC_SIGNALWIRE_PROJECT_ID:-}
+      SWR_SIGNALWIRE_API_TOKEN: ${MC_SIGNALWIRE_API_TOKEN:-}
+      SWR_SIGNALWIRE_SPACE_URL: ${MC_SIGNALWIRE_SPACE_URL:-}
+      SWR_LOG_LEVEL: ${MC_LOG_LEVEL:-INFO}
+    depends_on:
+      - multichannel
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

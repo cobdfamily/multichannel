@@ -1,0 +1,39 @@
+[project]
+name = "multichannel-signalwire-relay"
+version = "0.1.0"
+description = "SignalWire Relay WebSocket sidecar for the COBD multichannel service"
+requires-python = ">=3.12"
+license = "AGPL-3.0"
+dependencies = [
+  "signalwire>=2.0",
+  "httpx>=0.28",
+  "structlog>=24.4",
+  "pydantic-settings>=2.5",
+  "tenacity>=9.0",
+  "aiohttp>=3.9.5",
+]
+
+[project.scripts]
+signalwire_relay = "signalwire_relay.main:run"
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/signalwire_relay"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
