@@ -5,11 +5,15 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import JSON, DateTime, Enum, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from multichannel.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from multichannel.models.outbox_item import OutboxItem
 
 
 def enum_values(enum_cls: type[enum.Enum]) -> list[str]:

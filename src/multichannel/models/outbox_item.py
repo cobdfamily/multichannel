@@ -5,12 +5,16 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from multichannel.models.base import Base, TimestampMixin
 from multichannel.models.message import enum_values
+
+if TYPE_CHECKING:
+    from multichannel.models.message import Message
 
 
 class OutboxItemState(str, enum.Enum):

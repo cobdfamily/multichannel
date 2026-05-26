@@ -51,6 +51,8 @@ packages = ["src/multichannel"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+norecursedirs = ["sidecar", ".venv", "vendor"]
 
 [tool.coverage.run]
 branch = true
