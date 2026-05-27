@@ -46,6 +46,16 @@ class Settings(BaseSettings):
     OUTBOX_DRAIN_ENABLED: bool = False
     EVENT_OUTBOX_DRAIN_ENABLED: bool = False
 
+    # Token-bucket rate limits. Two buckets per /outbound:
+    # one per actor (X-Actor-Id), one per provider. Either
+    # exceeded -> 429 + Retry-After.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_ACTOR_PER_MIN: int = 60
+    RATE_LIMIT_POSTMARK_PER_MIN: int = 300
+    RATE_LIMIT_SIGNALWIRE_PER_MIN: int = 60
+    RATE_LIMIT_FBMESSENGER_PER_MIN: int = 60
+    RATE_LIMIT_INSTAGRAM_PER_MIN: int = 60
+
     LOG_LEVEL: Literal["debug", "info", "warning", "error"] = "info"
     LOG_FORMAT: Literal["json", "pretty"] = "json"
 

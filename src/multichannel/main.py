@@ -19,6 +19,7 @@ from multichannel.services.event_outbox_drain import EventOutboxDrain
 from multichannel.services.medici_client import MediciClient
 from multichannel.services.notaio_client import NotaioClient
 from multichannel.services.outbox_drain import OutboxDrain
+from multichannel.services.rate_limit import RateLimiter
 from multichannel.services.redis_publisher import RedisStreamPublisher
 
 
@@ -33,12 +34,21 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     notaio = NotaioClient(settings)
     medici = MediciClient(settings)
     redis = RedisStreamPublisher(settings.REDIS_URL)
+    # Open the publisher's connection up front so the limiter
+    # shares the same client. RateLimiter only used when enabled.
+    rate_limiter: RateLimiter | None = None
+    if settings.RATE_LIMIT_ENABLED:
+        await redis.connect()
+        client = getattr(redis, "_client", None)
+        if client is not None:
+            rate_limiter = RateLimiter(client)
     app.state.multichannel = AppState(
         settings=settings,
         database=database,
         notaio=notaio,
         medici=medici,
         redis=redis,
+        rate_limiter=rate_limiter,
     )
 
     outbox_task: asyncio.Task | None = None

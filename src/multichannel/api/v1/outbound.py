@@ -26,10 +26,20 @@ from multichannel.models import (
     MessageStatus,
 )
 from multichannel.models.outbox_item import OutboxItem
-from multichannel.runtime import Actor, actor_dep, medici_dep, notaio_dep, session_dep
+from multichannel.runtime import (
+    Actor,
+    actor_dep,
+    medici_dep,
+    notaio_dep,
+    rate_limiter_dep,
+    session_dep,
+    settings_dep,
+)
+from multichannel.config import Settings
 from multichannel.schemas.cloudevent import CloudEvent, MessageData
 from multichannel.services.medici_client import MediciClient, provider_to_channel
 from multichannel.services.notaio_client import AuditEvent, NotaioClient
+from multichannel.services.rate_limit import RateLimiter
 
 router = APIRouter(prefix="/outbound", tags=["outbound"])
 logger = structlog.get_logger("multichannel.outbound")
@@ -59,6 +69,14 @@ async def reap_expired(session: AsyncSession) -> None:
     await session.execute(delete(IdempotencyKey).where(IdempotencyKey.expires_at <= datetime.now(tz=UTC)))
 
 
+_PROVIDER_LIMIT_FIELD = {
+    "postmark":    "RATE_LIMIT_POSTMARK_PER_MIN",
+    "signalwire":  "RATE_LIMIT_SIGNALWIRE_PER_MIN",
+    "fbmessenger": "RATE_LIMIT_FBMESSENGER_PER_MIN",
+    "instagram":   "RATE_LIMIT_INSTAGRAM_PER_MIN",
+}
+
+
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def enqueue_outbound(
     request: Request,
@@ -67,10 +85,22 @@ async def enqueue_outbound(
     actor: Annotated[Actor, Depends(actor_dep)],
     notaio: Annotated[NotaioClient, Depends(notaio_dep)],
     medici: Annotated[MediciClient, Depends(medici_dep)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    rate_limiter: Annotated[RateLimiter | None, Depends(rate_limiter_dep)] = None,
     x_purpose: Annotated[str | None, Header(alias="X-Purpose")] = None,
     x_skip_consent: Annotated[str | None, Header(alias="X-Skip-Consent")] = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, str]:
+    """Enqueue an outbound message.
+
+    Order of checks (matters):
+    1. Envelope shape / direction / purpose.
+    2. Idempotency-Key (replay/conflict short-circuit; replays
+       do NOT consume rate-limit tokens).
+    3. Consent (via medici, unless service-override allowed).
+    4. Rate limits (per-actor + per-provider buckets).
+    5. Persist Message + OutboxItem + EventOutbox in one tx.
+    """
     if event.type != SEND_TYPE:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": {"code": "bad_type"}})
     data = event.data if isinstance(event.data, MessageData) else MessageData.model_validate(event.data)
@@ -156,6 +186,56 @@ async def enqueue_outbound(
             )
         )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"error": {"code": "consent-revoked"}})
+
+    # Rate limit gates (skipped if disabled or no limiter wired,
+    # e.g. unit tests with sqlite + no Redis).
+    if settings.RATE_LIMIT_ENABLED and rate_limiter is not None:
+        for scope_key, capacity, scope in [
+            (
+                f"actor:{actor.actor_id}",
+                settings.RATE_LIMIT_ACTOR_PER_MIN,
+                "actor",
+            ),
+            (
+                f"provider:{data.provider}",
+                getattr(settings, _PROVIDER_LIMIT_FIELD[data.provider]),
+                "provider",
+            ),
+        ]:
+            allowed, retry_after = await rate_limiter.check(
+                scope_key, capacity, capacity / 60.0,
+            )
+            if not allowed:
+                await notaio.record(
+                    AuditEvent(
+                        actor_user_id=actor.actor_id,
+                        action="outbound.rate_limited",
+                        outcome="denied",
+                        subject=str(person_id),
+                        metadata={
+                            "scope": scope,
+                            "provider": data.provider,
+                            "retry_after_seconds": retry_after,
+                        },
+                    )
+                )
+                # Roll back any uncommitted writes from this tx
+                # (idempotency claim above) — without this, a
+                # rejected request still leaves an IdempotencyKey
+                # row that maps to no Message.
+                if key_claim is not None:
+                    await session.delete(key_claim)
+                    await session.flush()
+                from math import ceil
+                return JSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    headers={"Retry-After": str(ceil(retry_after))},
+                    content={
+                        "error": "rate_limited",
+                        "scope": scope,
+                        "retry_after_seconds": retry_after,
+                    },
+                )
 
     message = Message(
         direction=MessageDirection.OUT,

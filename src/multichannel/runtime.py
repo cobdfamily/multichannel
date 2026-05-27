@@ -13,6 +13,7 @@ from multichannel.config import Settings
 from multichannel.db import Database
 from multichannel.services.medici_client import MediciClient
 from multichannel.services.notaio_client import NotaioClient
+from multichannel.services.rate_limit import RateLimiter
 from multichannel.services.redis_publisher import RedisStreamPublisher
 
 
@@ -29,6 +30,7 @@ class AppState:
     notaio: NotaioClient
     medici: MediciClient
     redis: RedisStreamPublisher
+    rate_limiter: RateLimiter | None = field(default=None)
     outbox_task: asyncio.Task | None = field(default=None)
     event_outbox_task: asyncio.Task | None = field(default=None)
 
@@ -103,3 +105,7 @@ def medici_dep(request: Request) -> MediciClient:
 
 def redis_dep(request: Request) -> RedisStreamPublisher:
     return state(request).redis
+
+
+def rate_limiter_dep(request: Request) -> RateLimiter | None:
+    return state(request).rate_limiter
