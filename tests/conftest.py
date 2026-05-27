@@ -49,6 +49,19 @@ class FakeScalarResult:
         return self._rows
 
 
+class FakeExecuteResult:
+    """Mimic enough of sqlalchemy Result for delivery_status tests."""
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+
+    def scalar_one_or_none(self) -> object | None:
+        return self._rows[0] if self._rows else None
+
+    def scalars(self) -> FakeScalarResult:
+        return FakeScalarResult(self._rows)
+
+
 class FakeSession:
     def __init__(self, store: MemoryStore) -> None:
         self.store = store
@@ -151,6 +164,43 @@ class FakeSession:
 
     async def scalars(self, statement) -> FakeScalarResult:  # noqa: ANN001
         return FakeScalarResult(list(self.store.messages))
+
+    async def execute(self, statement) -> FakeExecuteResult:  # noqa: ANN001
+        # Minimal support for the delivery_status routes: a single
+        # WHERE clause filtering Message by provider + provider_message_id
+        # (or by provider + provider_thread_id + direction).
+        provider = None
+        provider_message_id = None
+        provider_thread_id = None
+        direction = None
+        for criterion in getattr(statement, "_where_criteria", ()):
+            if isinstance(criterion, BinaryExpression):
+                name = getattr(criterion.left, "name", None)
+                value = getattr(criterion.right, "value", None)
+                if name == "provider":
+                    provider = getattr(value, "value", value)
+                elif name == "provider_message_id":
+                    provider_message_id = value
+                elif name == "provider_thread_id":
+                    provider_thread_id = value
+                elif name == "direction":
+                    direction = getattr(value, "value", value)
+        rows = list(self.store.messages)
+        if provider is not None:
+            rows = [
+                r for r in rows
+                if (getattr(r.provider, "value", r.provider)) == provider
+            ]
+        if provider_message_id is not None:
+            rows = [r for r in rows if r.provider_message_id == provider_message_id]
+        if provider_thread_id is not None:
+            rows = [r for r in rows if r.provider_thread_id == provider_thread_id]
+        if direction is not None:
+            rows = [
+                r for r in rows
+                if (getattr(r.direction, "value", r.direction)) == direction
+            ]
+        return FakeExecuteResult(rows)
 
 
 class FakeDatabase:
