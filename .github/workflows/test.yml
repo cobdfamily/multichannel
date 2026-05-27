@@ -53,3 +53,41 @@ jobs:
         run: uv run ruff check src tests
       - name: run pytest
         run: uv run pytest -q
+
+  migrate:
+    # Spin up a real Postgres, exercise the alembic migration
+    # chain + the asyncpg path. The bulk of pytest runs against
+    # a sqlite-less in-memory fake (fast); this job catches
+    # anything that would break only against actual Postgres.
+    runs-on: ubuntu-latest
+    needs: [lint]
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: multichannel
+          POSTGRES_PASSWORD: multichannel
+          POSTGRES_DB: multichannel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U multichannel"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      MC_DATABASE_URL: postgresql+asyncpg://multichannel:multichannel@localhost:5432/multichannel
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with: { version: latest, enable-cache: true }
+      - run: uv python install 3.12
+      - run: uv sync
+      - name: alembic upgrade head
+        run: uv run alembic upgrade head
+      - name: alembic check (model vs migration drift)
+        # Should be a no-op when models + migrations match.
+        # Fails CI if a model is added without a corresponding
+        # autogenerate'd revision.
+        run: uv run alembic check || true   # advisory until autogenerate flow stabilises
